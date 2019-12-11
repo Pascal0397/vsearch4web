@@ -1,7 +1,12 @@
-from flask import Flask, render_template, request, escape
+from flask import Flask, render_template, request, session
+from flask import copy_current_request_context
 from vsearch import search4letters
 
-from webapp.DBcm import UseDatabase
+from webapp.DBcm import UseDatabase, ConnectionError, CredentialsError, SQLError
+from webapp.checker import check_logged_in
+
+from threading import Thread
+from time import sleep
 
 app = Flask(__name__)
 
@@ -11,55 +16,99 @@ app.config['dbconfig'] = {'host': '127.0.0.1',
                           'database': 'vsearchlogDB'}
 
 
-def log_request(req: 'flask_request', res: str) -> None:
-    """Log Details of the web request and the results"""
+@app.route('/login')
+def do_login() -> str:
+    """Check if the user is logged in"""
+    session['logged_in'] = True
+    return 'You are logged in.'
 
-    with UseDatabase(app.config['dbconfig']) as cursor:
-        _SQL = """insert into log
-                (phrase, letters, ip, browser_string, results)
-                values
-                (%s, %s, %s, %s, %s)"""
-        cursor.execute(_SQL, (req.form['phrase'],
-                              req.form['letters'],
-                              req.remote_addr,
-                              req.user_agent.browser,
-                              res, ))
+
+@app.route('/logout')
+def do_logout() -> str:
+    """Logs the user out"""
+    session.pop('logged_in')
+    return 'You are now logged out.'
 
 
 @app.route('/search4', methods=['POST'])
-def do_search() -> str:
+def do_search() -> 'html':
+
+    @copy_current_request_context
+    def log_request(req: 'flask_request', res: str) -> None:
+        """Writes to the Database"""
+        sleep(15)
+        try:
+            with UseDatabase(app.config['dbconfig']) as cursor:
+                _SQL = """insert into log
+                    (phrase, letters, ip, browser_string, results)
+                    values
+                    (%s, %s, %s, %s, %s)"""
+                cursor.execute(_SQL, (req.form['phrase'],
+                                      req.form['letters'],
+                                      req.remote_addr,
+                                      req.user_agent.browser,
+                                      res, ))
+        except ConnectionError as errr:
+            print('Is your database switched on? Error:', str(errr))
+        except CredentialsError as errr:
+            print('User-id/Password issues. Error:', str(errr))
+        except SQLError as errr:
+            print('Something went wrong:', str(errr))
+        except Exception as errr:
+            print('Something went wrong:', str(errr))
+        return 'Error'
+
     phrase = request.form['phrase']
     letters = request.form['letters']
-    title = "Here are your results:"
+    title = 'Here are your results:'
     results = str(search4letters(phrase, letters))
-    log_request(request, results)
+    try:
+        t = Thread(target=log_request, args=(request, results))
+        t.start()
+    except Exception as err:
+        print('***** Logging failed with this error:', str(err))
     return render_template('results.html',
+                           the_title=title,
                            the_phrase=phrase,
                            the_letters=letters,
-                           the_title=title,
                            the_results=results,)
 
 
 @app.route('/')
 @app.route('/entry')
 def entry_page() -> 'html':
+    """The entry page of this website"""
     return render_template('entry.html',
                            the_title='Welcome to search4letters on the web!')
 
 
 @app.route('/viewlog')
+@check_logged_in
 def view_the_log() -> 'html':
     """Displays the contents of the log file as a HTML table."""
-    with UseDatabase(app.config['dbconfig']) as cursor:
-        _SQL = """select phrase, letters ip, browser_string, results from log"""
-        cursor.execute(_SQL)
-        contents = cursor.fetchall()
-    titles = ('Phrase', 'Letters', 'Remote_addr', 'User_agent', 'Results')
-    return render_template('viewlog.html',
-                           the_title='View Log',
-                           the_row_titles=titles,
-                           the_data=contents)
+    try:
+        with UseDatabase(app.config['dbconfig']) as cursor:
+            _SQL = """select phrase, letters ip, browser_string, results from log"""
+            cursor.execute(_SQL)
+            contents = cursor.fetchall()
+        # raise Exception("Some unknown exception.")
+        titles = ('Phrase', 'Letters', 'Remote_addr', 'User_agent', 'Results')
+        return render_template('viewlog.html',
+                               the_title='View Log',
+                               the_row_titles=titles,
+                               the_data=contents)
+    except ConnectionError as err:
+        print('Is your database switched on? Error:', str(err))
+    except CredentialsError as err:
+        print('User-id/Password issues. Error:', str(err))
+    except SQLError as err:
+        print('Something went wrong:', str(err))
+    except Exception as err:
+        print('Something went wrong:', str(err))
+    return 'Error'
 
+
+app.secret_key = 'YouWillNeverGuessMySecretKey'
 
 if __name__ == '__main__':
     app.run(debug=True)
